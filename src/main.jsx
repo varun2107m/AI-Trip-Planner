@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Plane, Sparkles, Search, MapPin, CalendarDays, Users, Wallet, Hotel, Utensils, Compass, Car, ShieldCheck, CreditCard, Bell, UserRound, Star, Clock3, CheckCircle2, Edit3, Trash2, Eye, X, Plus, Loader2, ChevronRight, Luggage, Heart, SlidersHorizontal, BadgePercent, Route, Sunrise, Moon, CloudSun, Ticket, MessageCircle, Download, ArrowRight } from 'lucide-react';
 import './styles.css';
@@ -64,7 +64,9 @@ function validate(form) {
   const days = daysBetween(form.startDate, form.endDate);
   if (!form.from.trim()) errors.from = 'Origin city is required.';
   if (!form.destination) errors.destination = 'Choose a destination.';
+  if (form.from.trim() && form.destination && form.from.trim().toLowerCase() === form.destination.toLowerCase()) errors.destination = 'Destination cannot be the same as origin.';
   if (!form.startDate) errors.startDate = 'Select start date.';
+  else if (form.startDate < new Date().toISOString().split('T')[0]) errors.startDate = 'Departure date cannot be in the past.';
   if (!form.endDate) errors.endDate = 'Select return date.';
   if (form.startDate && form.endDate && days <= 0) errors.endDate = 'Return date must be after departure date.';
   if (days > 14) errors.endDate = 'Trips longer than 14 days need concierge review.';
@@ -75,10 +77,17 @@ function validate(form) {
   return errors;
 }
 
+/* --- Status Badge Component --- */
+function StatusBadge({ status }) {
+  const label = status || 'Draft';
+  const cls = label.toLowerCase();
+  return <span className={`statusBadge ${cls}`} data-testid={`status-badge-${cls}`}>{label}</span>;
+}
+
 function App() {
   const [form, setForm] = useState(blank);
   const [errors, setErrors] = useState({});
-  const [active, setActive] = useState('planner');
+  const [active, setActive] = useState('home');
   const [loading, setLoading] = useState(false);
   const [plan, setPlan] = useState(null);
   const [saved, setSaved] = useState([]);
@@ -98,8 +107,33 @@ function App() {
     favourite: saved[0]?.destination || 'Explore now'
   }), [saved]);
 
+  /* --- Auto-dismiss toast after 4 seconds --- */
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(''), 4000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
   const update = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
   const toggleList = (key, item) => update(key, form[key].includes(item) ? form[key].filter(x => x !== item) : [...form[key], item]);
+
+  /* --- Navigate to a section and scroll into view --- */
+  const contentRef = useRef(null);
+  const navigateTo = useCallback((view) => {
+    setActive(view);
+    // Wait for React to render the section, then scroll to it
+    setTimeout(() => {
+      if (contentRef.current) {
+        contentRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 50);
+  }, []);
+
+  const showToast = useCallback((msg) => {
+    setToast('');
+    // Small delay to re-trigger animation if a toast is already visible
+    setTimeout(() => setToast(msg), 50);
+  }, []);
 
   const generate = () => {
     const next = validate(form);
@@ -112,27 +146,34 @@ function App() {
       setPlan(result);
       setTab('summary');
       setLoading(false);
-      setToast('Your smart travel plan is ready.');
+      if (result.budget.total > Number(form.budget)) {
+        showToast(`Plan ready. Note: estimated cost ${INR.format(result.budget.total)} exceeds your budget of ${INR.format(Number(form.budget))}.`);
+      } else {
+        showToast('Your smart travel plan is ready.');
+      }
     }, 850);
   };
 
   const save = () => {
-    if (!plan) return setToast('Create a plan first.');
+    if (!plan) return showToast('Create a plan first.');
     // Intentional hidden issue: same trip can be saved repeatedly without duplicate warning.
     setSaved(prev => [{ ...plan, status: 'Saved' }, ...prev]);
-    setToast('Trip saved to My Trips.');
+    showToast('Trip saved to My Trips.');
   };
 
   const confirm = () => {
-    if (!plan) return setToast('Create a plan first.');
+    if (!plan) return showToast('Create a plan first.');
     let total = plan.budget.total;
     // Intentional hidden issue: expired promo code still applies discount.
     if (promo.trim().toUpperCase() === 'EARLYBIRD') total = Math.round(total * 0.9);
     const confirmed = { ...plan, status: 'Confirmed', payable: total, confirmation: `WM-${Date.now().toString().slice(-6)}` };
     setPlan(confirmed);
-    setSaved(prev => [confirmed, ...prev]);
+    setSaved(prev => {
+      const withoutOld = prev.filter(t => t.id !== plan.id);
+      return [confirmed, ...withoutOld];
+    });
     setTab('checkout');
-    setToast('Trip confirmed successfully.');
+    showToast('Trip confirmed successfully.');
   };
 
   const editTrip = (trip) => {
@@ -143,69 +184,110 @@ function App() {
   };
 
   const removeTrip = (id) => {
+    if (!window.confirm('Are you sure you want to delete this trip? This cannot be undone.')) return;
     // Intentional hidden issue: detail panel remains open for deleted trip until manually closed.
     setSaved(prev => prev.filter(t => t.id !== id));
-    setToast('Trip removed.');
+    showToast('Trip removed.');
   };
 
   const cancelTrip = (id) => {
+    if (!window.confirm('Cancel this trip? You will not be able to undo this action.')) return;
     setSaved(prev => prev.map(t => t.id === id ? { ...t, status: 'Cancelled' } : t));
-    setToast('Trip cancelled. Refund estimate will be visible shortly.');
+    showToast('Trip cancelled. Refund estimate will be visible shortly.');
   };
 
   return <main>
-    <nav className="topbar">
-      <a className="brand" href="#home"><Plane/><span>WanderMind AI</span></a>
-      <div className="navlinks"><button onClick={() => setActive('planner')}>Plan</button><button onClick={() => setActive('trips')}>My Trips</button><button onClick={() => setActive('insights')}>Insights</button><button onClick={() => setShowProfile(true)}><UserRound size={17}/>Profile</button></div>
+    <nav className="topbar" data-testid="navbar">
+      <a className="brand" href="#home" data-testid="brand-link" onClick={(e) => { e.preventDefault(); setActive('home'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}><Plane/><span>WanderMind AI</span></a>
+      <div className="navlinks">
+        <button data-testid="nav-plan" className={active === 'planner' ? 'navActive' : ''} onClick={() => navigateTo('planner')}>Plan</button>
+        <button data-testid="nav-trips" className={active === 'trips' ? 'navActive' : ''} onClick={() => navigateTo('trips')}>My Trips</button>
+        <button data-testid="nav-insights" className={active === 'insights' ? 'navActive' : ''} onClick={() => navigateTo('insights')}>Insights</button>
+        <button data-testid="nav-profile" onClick={() => setShowProfile(true)}><UserRound size={17}/>Profile</button>
+      </div>
     </nav>
 
-    <section id="home" className="hero">
-      <div className="heroCopy"><span className="pill"><Sparkles size={16}/> AI travel workspace</span><h1>From idea to confirmed itinerary in minutes.</h1><p>Compare destinations, build day-wise plans, review stays, flights, budgets and travel readiness from one polished planning dashboard.</p><div className="heroActions"><button onClick={() => setActive('planner')} className="primary">Start planning <ArrowRight size={17}/></button><button onClick={() => setActive('trips')} className="secondary">View trips</button></div></div>
-      <div className="heroCard"><div className="cardTop"><span>Recommended now</span><BadgePercent/></div>{recommended.slice(0,3).map(([name,d]) => <button className="rec" key={name} onClick={() => {update('destination', name); setActive('planner')}}><span className="emoji">{d.image}</span><span><b>{name}</b><small>{d.mood}</small></span><strong>{d.score}%</strong></button>)}</div>
-    </section>
+    {active === 'home' && <>
+      <section id="home" className="hero" data-testid="hero-section">
+        <div className="heroCopy"><span className="pill"><Sparkles size={16}/> AI travel workspace</span><h1>From idea to confirmed itinerary in minutes.</h1><p>Compare destinations, build day-wise plans, review stays, flights, budgets and travel readiness from one polished planning dashboard.</p><div className="heroActions"><button onClick={() => navigateTo('planner')} className="primary" data-testid="hero-start-planning">Start planning <ArrowRight size={17}/></button><button onClick={() => navigateTo('trips')} className="secondary" data-testid="hero-view-trips">View trips</button></div></div>
+        <div className="heroCard" data-testid="hero-recommendations"><div className="cardTop"><span>Recommended now</span><BadgePercent/></div>{recommended.slice(0,3).map(([name,d]) => <button className="rec" key={name} data-testid={`rec-${name.toLowerCase()}`} onClick={() => {update('destination', name); navigateTo('planner')}}><span className="emoji">{d.image}</span><span><b>{name}</b><small>{d.mood}</small></span><strong>{d.score}%</strong></button>)}</div>
+      </section>
 
-    <section className="dashboard">
-      <article><Luggage/><span>Total trips</span><b>{stats.trips}</b></article><article><CheckCircle2/><span>Confirmed</span><b>{stats.confirmed}</b></article><article><Wallet/><span>Planned spend</span><b>{INR.format(stats.spend)}</b></article><article><Heart/><span>Favourite</span><b>{stats.favourite}</b></article>
-    </section>
+      <section className="dashboard" data-testid="dashboard-stats">
+        <article><Luggage/><span>Total trips</span><b data-testid="stat-total-trips">{stats.trips}</b></article>
+        <article><CheckCircle2/><span>Confirmed</span><b data-testid="stat-confirmed">{stats.confirmed}</b></article>
+        <article><Wallet/><span>Planned spend</span><b data-testid="stat-spend">{INR.format(stats.spend)}</b></article>
+        <article><Heart/><span>Favourite</span><b data-testid="stat-favourite">{stats.favourite}</b></article>
+      </section>
+    </>}
 
-    {toast && <div className="toast"><CheckCircle2 size={18}/>{toast}<button onClick={() => setToast('')}><X size={16}/></button></div>}
+    {toast && <div className="toast" data-testid="toast-notification" role="alert"><CheckCircle2 size={18}/>{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={16}/></button></div>}
 
-    {active === 'planner' && <section id="planner" className="workspace">
+    {active === 'planner' && <section id="planner" className="workspace" data-testid="planner-section" ref={contentRef}>
       <div className="plannerPanel glass">
         <div className="sectionTitle"><span><SlidersHorizontal/> Trip preferences</span><small>Traveller limit shown: 1–9 people</small></div>
-        <div className="grid2"><label>From<input value={form.from} onChange={e=>update('from', e.target.value)} placeholder="Delhi" />{errors.from && <small className="err">{errors.from}</small>}</label><label>Destination<select value={form.destination} onChange={e=>update('destination', e.target.value)}><option value="">Select destination</option>{Object.keys(destinations).map(d=><option key={d}>{d}</option>)}</select>{errors.destination && <small className="err">{errors.destination}</small>}</label></div>
-        <div className="grid2"><label>Departure<input type="date" value={form.startDate} onChange={e=>update('startDate', e.target.value)} />{errors.startDate && <small className="err">{errors.startDate}</small>}</label><label>Return<input type="date" value={form.endDate} onChange={e=>update('endDate', e.target.value)} />{errors.endDate && <small className="err">{errors.endDate}</small>}</label></div>
-        <div className="grid3"><label>Adults<input type="number" min="1" max="9" value={form.adults} onChange={e=>update('adults', e.target.value)} />{errors.adults && <small className="err">{errors.adults}</small>}</label><label>Children<input type="number" min="0" max="8" value={form.children} onChange={e=>update('children', e.target.value)} /></label><label>Total budget<input type="number" value={form.budget} onChange={e=>update('budget', e.target.value)} />{errors.budget && <small className="err">{errors.budget}</small>}</label></div>
-        <label>Travel profile<select value={form.profile} onChange={e=>update('profile', e.target.value)}>{profiles.map(p=><option key={p.id} value={p.id}>{p.name} • {p.type} • {p.loyalty}</option>)}</select></label>
-        <div className="chips"><b>Interests</b>{interests.map(i=><button key={i} onClick={()=>toggleList('interests', i)} className={form.interests.includes(i)?'chip on':'chip'}>{i}</button>)}{errors.interests && <small className="err wide">{errors.interests}</small>}</div>
-        <div className="chips"><b>Add-ons</b>{addons.map(i=><button key={i} onClick={()=>toggleList('addons', i)} className={form.addons.includes(i)?'chip on':'chip'}>{i}</button>)}</div>
-        <div className="actions"><button className="primary" onClick={generate}>{loading ? <Loader2 className="spin"/> : <Sparkles/>} Generate plan</button><button className="secondary" onClick={()=>{setForm(blank); setPlan(null); setErrors({})}}>Reset</button></div>
+        <div className="grid2">
+          <label>From<input data-testid="input-from" value={form.from} onChange={e=>update('from', e.target.value)} placeholder="Delhi" />{errors.from && <small className="err">{errors.from}</small>}</label>
+          <label>Destination<select data-testid="select-destination" value={form.destination} onChange={e=>update('destination', e.target.value)}><option value="">Select destination</option>{Object.keys(destinations).map(d=><option key={d}>{d}</option>)}</select>{errors.destination && <small className="err">{errors.destination}</small>}</label>
+        </div>
+        <div className="grid2">
+          <label>Departure<input data-testid="input-departure" type="date" value={form.startDate} onChange={e=>update('startDate', e.target.value)} />{errors.startDate && <small className="err">{errors.startDate}</small>}</label>
+          <label>Return<input data-testid="input-return" type="date" value={form.endDate} onChange={e=>update('endDate', e.target.value)} />{errors.endDate && <small className="err">{errors.endDate}</small>}</label>
+        </div>
+        <div className="grid3">
+          <label>Adults<input data-testid="input-adults" type="number" min="1" max="9" value={form.adults} onChange={e=>update('adults', e.target.value)} />{errors.adults && <small className="err">{errors.adults}</small>}</label>
+          <label>Children<input data-testid="input-children" type="number" min="0" max="8" value={form.children} onChange={e=>update('children', e.target.value)} /></label>
+          <label>Total budget<input data-testid="input-budget" type="number" value={form.budget} onChange={e=>update('budget', e.target.value)} />{errors.budget && <small className="err">{errors.budget}</small>}</label>
+        </div>
+        <label>Travel profile<select data-testid="select-profile" value={form.profile} onChange={e=>update('profile', e.target.value)}>{profiles.map(p=><option key={p.id} value={p.id}>{p.name} • {p.type} • {p.loyalty}</option>)}</select></label>
+        <div className="chips" data-testid="interests-group"><b>Interests</b>{interests.map(i=><button key={i} data-testid={`interest-${i.toLowerCase()}`} onClick={()=>toggleList('interests', i)} className={form.interests.includes(i)?'chip on':'chip'}>{i}</button>)}{errors.interests && <small className="err wide">{errors.interests}</small>}</div>
+        <div className="chips" data-testid="addons-group"><b>Add-ons</b>{addons.map(i=><button key={i} data-testid={`addon-${i.toLowerCase().replace(/\s+/g, '-')}`} onClick={()=>toggleList('addons', i)} className={form.addons.includes(i)?'chip on':'chip'}>{i}</button>)}</div>
+        <div className="actions"><button className="primary" data-testid="btn-generate" onClick={generate}>{loading ? <Loader2 className="spin"/> : <Sparkles/>} Generate plan</button><button className="secondary" data-testid="btn-reset" onClick={()=>{setForm(blank); setPlan(null); setErrors({})}}>Reset</button></div>
       </div>
 
-      <div className="resultPanel glass">
+      <div className="resultPanel glass" data-testid="result-panel">
         {!plan && !loading && <div className="empty"><CloudSun size={46}/><h3>Your itinerary will appear here</h3><p>Choose a destination and preferences to generate hotel, flight, route and budget suggestions.</p></div>}
         {loading && <div className="empty"><Loader2 className="spin big"/><h3>Designing your travel plan</h3><p>Analysing route comfort, budget range, traveller preferences and local experiences.</p></div>}
         {plan && !loading && <>
-          <div className="planHero"><div><span className="emoji bigEmoji">{plan.image}</span><h2>{plan.days}-day {plan.destination} itinerary</h2><p>{plan.mood} • {plan.weather} • {plan.visa}</p></div><div className="score"><b>{plan.match}%</b><span>match</span></div></div>
-          <div className="tabs">{['summary','itinerary','options','checkout'].map(t=><button key={t} className={tab===t?'active':''} onClick={()=>setTab(t)}>{t}</button>)}</div>
-          {tab==='summary' && <div className="summary"><article><Route/><b>{plan.hero}</b><span>{plan.safety}</span></article><article><Users/><b>{plan.people} travellers</b><span>{plan.pace} pace</span></article><article><Wallet/><b>{INR.format(plan.budget.total)}</b><span>Estimated payable</span></article></div>}
-          {tab==='itinerary' && <div className="itinerary">{plan.itinerary.map(day=><article key={day.day}><div className="dayNo">Day {day.day}</div><h4>{day.title}</h4><p><Sunrise/> {day.morning}</p><p><Compass/> {day.afternoon}</p><p><Moon/> {day.evening}</p><small>{day.alert}</small></article>)}</div>}
-          {tab==='options' && <div className="options"><div><h3><Hotel/> Hotels</h3>{plan.hotels.map(h=><p key={h}><Star size={15}/> {h}</p>)}</div><div><h3><Plane/> Flights</h3>{plan.flights.map(f=><p key={f}><Clock3 size={15}/> {f}</p>)}</div><div><h3><Ticket/> Experiences</h3>{plan.experiences.slice(0,4).map(e=><p key={e}><Compass size={15}/> {e}</p>)}</div></div>}
-          {tab==='checkout' && <div className="checkout"><h3><CreditCard/> Booking summary</h3>{Object.entries(plan.budget).filter(([k])=>k!=='total').map(([k,v])=><div className="line" key={k}><span>{k}</span><b>{INR.format(v)}</b></div>)}<label>Promo code<input value={promo} onChange={e=>setPromo(e.target.value)} placeholder="Enter code" /></label><div className="pay"><span>Total</span><b>{INR.format(plan.payable || plan.budget.total)}</b></div>{plan.confirmation && <div className="confirm"><BadgePercent/> Confirmation: {plan.confirmation}</div>}</div>}
-          <div className="actions"><button className="primary" onClick={save}><Plus/> Save trip</button><button className="secondary" onClick={confirm}><ShieldCheck/> Confirm itinerary</button><button className="secondary"><Download/> Download</button></div>
+          <div className="planHero" data-testid="plan-hero"><div><span className="emoji bigEmoji">{plan.image}</span><h2 data-testid="plan-title">{plan.days}-day {plan.destination} itinerary</h2><p>{plan.mood} • {plan.weather} • {plan.visa}</p></div><div className="score"><b data-testid="plan-match-score">{plan.match}%</b><span>match</span></div></div>
+          <div className="tabs" data-testid="plan-tabs">{['summary','itinerary','options','checkout'].map(t=><button key={t} data-testid={`tab-${t}`} className={tab===t?'active':''} onClick={()=>setTab(t)}>{t}</button>)}</div>
+          {tab==='summary' && <div className="summary" data-testid="tab-summary-content"><article><Route/><b>{plan.hero}</b><span>{plan.safety}</span></article><article><Users/><b>{plan.people} travellers</b><span>{plan.pace} pace</span></article><article><Wallet/><b data-testid="summary-total">{INR.format(plan.budget.total)}</b><span>Estimated payable</span></article></div>}
+          {tab==='itinerary' && <div className="itinerary" data-testid="tab-itinerary-content">{plan.itinerary.map(day=><article key={day.day} data-testid={`itinerary-day-${day.day}`}><div className="dayNo">Day {day.day}</div><h4>{day.title}</h4><p><Sunrise/> {day.morning}</p><p><Compass/> {day.afternoon}</p><p><Moon/> {day.evening}</p><small>{day.alert}</small></article>)}</div>}
+          {tab==='options' && <div className="options" data-testid="tab-options-content"><div><h3><Hotel/> Hotels</h3>{plan.hotels.map(h=><p key={h}><Star size={15}/> {h}</p>)}</div><div><h3><Plane/> Flights</h3>{plan.flights.map(f=><p key={f}><Clock3 size={15}/> {f}</p>)}</div><div><h3><Ticket/> Experiences</h3>{plan.experiences.slice(0,4).map(e=><p key={e}><Compass size={15}/> {e}</p>)}</div></div>}
+          {tab==='checkout' && <div className="checkout" data-testid="tab-checkout-content"><h3><CreditCard/> Booking summary</h3>{Object.entries(plan.budget).filter(([k])=>k!=='total').map(([k,v])=><div className="line" key={k} data-testid={`checkout-line-${k}`}><span>{k}</span><b>{INR.format(v)}</b></div>)}<label>Promo code<input data-testid="input-promo" value={promo} onChange={e=>setPromo(e.target.value)} placeholder="Enter code" /></label><div className="pay" data-testid="checkout-total"><span>Total</span><b>{INR.format(plan.payable || plan.budget.total)}</b></div>{plan.confirmation && <div className="confirm" data-testid="confirmation-id"><BadgePercent/> Confirmation: {plan.confirmation}</div>}</div>}
+          <div className="actions">
+            <button className="primary" data-testid="btn-save" onClick={save}><Plus/> Save trip</button>
+            <button className="secondary" data-testid="btn-confirm" onClick={confirm}><ShieldCheck/> Confirm itinerary</button>
+            <button className="secondary" data-testid="btn-download" aria-label="Download itinerary"><Download/> Download</button>
+          </div>
         </>}
       </div>
     </section>}
 
-    {active === 'trips' && <section className="myTrips glass"><div className="sectionTitle"><span><Luggage/> My Trips</span><label className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search destination or status" /></label></div>{!filtered.length && <div className="empty slim"><MapPin/><h3>No trips found</h3><p>Saved and confirmed itineraries will be available here.</p></div>}<div className="tripGrid">{filtered.map(t=><article className="tripCard" key={t.id}><span className="emoji">{t.image}</span><h3>{t.destination}</h3><p>{t.days} days • {t.people} travellers • {t.status}</p><b>{INR.format(t.payable || t.budget.total)}</b><div><button onClick={()=>setSelected(t)}><Eye size={15}/>View</button><button onClick={()=>editTrip(t)}><Edit3 size={15}/>Edit</button><button onClick={()=>cancelTrip(t.id)}>Cancel</button><button onClick={()=>removeTrip(t.id)}><Trash2 size={15}/></button></div></article>)}</div></section>}
+    {active === 'trips' && <section className="myTrips glass" data-testid="my-trips-section" ref={contentRef}>
+      <div className="sectionTitle"><span><Luggage/> My Trips</span><label className="search"><Search size={16}/><input data-testid="input-search-trips" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search destination or status" /></label></div>
+      {!filtered.length && <div className="empty slim"><MapPin/><h3>No trips found</h3><p>Saved and confirmed itineraries will be available here.</p></div>}
+      <div className="tripGrid" data-testid="trip-grid">{filtered.map(t=><article className="tripCard" key={t.id} data-testid={`trip-card-${t.id}`}>
+        <span className="emoji">{t.image}</span>
+        <h3>{t.destination}</h3>
+        <p>{t.days} days • {t.people} travellers • <StatusBadge status={t.status} /></p>
+        <b>{INR.format(t.payable || t.budget.total)}</b>
+        <div>
+          <button data-testid={`btn-view-${t.id}`} onClick={()=>setSelected(t)}><Eye size={15}/>View</button>
+          <button data-testid={`btn-edit-${t.id}`} onClick={()=>editTrip(t)}><Edit3 size={15}/>Edit</button>
+          <button data-testid={`btn-cancel-${t.id}`} onClick={()=>cancelTrip(t.id)} disabled={t.status === 'Cancelled'}>Cancel</button>
+          <button data-testid={`btn-delete-${t.id}`} onClick={()=>removeTrip(t.id)} aria-label={`Delete ${t.destination} trip`}><Trash2 size={15}/>Delete</button>
+        </div>
+      </article>)}</div>
+    </section>}
 
-    {active === 'insights' && <section className="insights"><div className="sectionTitle"><span><Bell/> Travel Insights</span><small>Live-style intelligence for smarter planning</small></div><div className="insightGrid">{Object.entries(destinations).map(([name,d])=><article key={name}><span className="emoji">{d.image}</span><h3>{name}</h3><p>{d.mood}</p><div className="meter"><i style={{width: `${d.score}%`}} /></div><small>{d.safety}</small></article>)}</div></section>}
+    {active === 'insights' && <section className="insights" data-testid="insights-section" ref={contentRef}><div className="sectionTitle"><span><Bell/> Travel Insights</span><small>Live-style intelligence for smarter planning</small></div><div className="insightGrid">{Object.entries(destinations).map(([name,d])=><article key={name} data-testid={`insight-${name.toLowerCase()}`}><span className="emoji">{d.image}</span><h3>{name}</h3><p>{d.mood}</p><div className="meter"><i style={{width: `${d.score}%`}} /></div><small>{d.safety}</small></article>)}</div></section>}
 
-    {selected && <div className="modal"><div className="modalBox"><button className="close" onClick={()=>setSelected(null)}><X/></button><h2>{selected.destination} trip details</h2><p>{selected.days} days • {selected.status} • {selected.confirmation || 'Not confirmed'}</p><div className="summary"><article><CalendarDays/><b>{selected.startDate}</b><span>Departure</span></article><article><Wallet/><b>{INR.format(selected.payable || selected.budget.total)}</b><span>Total</span></article><article><Hotel/><b>{selected.hotels[0]}</b><span>Suggested stay</span></article></div></div></div>}
+    {selected && <div className="modal" data-testid="trip-detail-modal"><div className="modalBox"><button className="close" data-testid="btn-close-modal" onClick={()=>setSelected(null)} aria-label="Close trip details"><X/></button><h2>{selected.destination} trip details</h2><p>{selected.days} days • <StatusBadge status={selected.status} /> • {selected.confirmation || 'Not confirmed'}</p><div className="summary"><article><CalendarDays/><b data-testid="modal-departure">{selected.startDate}</b><span>Departure</span></article><article><Wallet/><b data-testid="modal-total">{INR.format(selected.payable || selected.budget.total)}</b><span>Total</span></article><article><Hotel/><b data-testid="modal-hotel">{selected.hotels[0]}</b><span>Suggested stay</span></article></div></div></div>}
 
-    {showProfile && <div className="modal"><div className="modalBox"><button className="close" onClick={()=>setShowProfile(false)}><X/></button><h2>Traveller profile</h2>{profiles.map(p=><article className="profile" key={p.id}><UserRound/><div><b>{p.name}</b><p>{p.type} traveller • {p.loyalty} member • Passport {p.passport}</p></div></article>)}<button className="primary"><MessageCircle/> Chat with concierge</button></div></div>}
+    {showProfile && <div className="modal" data-testid="profile-modal"><div className="modalBox"><button className="close" data-testid="btn-close-profile" onClick={()=>setShowProfile(false)} aria-label="Close profile"><X/></button><h2>Traveller profile</h2>{profiles.map(p=><article className="profile" key={p.id} data-testid={`profile-${p.id}`}><UserRound/><div><b>{p.name}</b><p>{p.type} traveller • {p.loyalty} member • Passport {p.passport}</p></div></article>)}<button className="primary" data-testid="btn-chat-concierge" onClick={() => { setShowProfile(false); showToast('Concierge chat is coming soon. Use email support for now.'); }}><MessageCircle/> Chat with concierge</button></div></div>}
 
-    <footer><b>WanderMind AI</b><span>Personalised travel planning, trip management and booking readiness.</span></footer>
+    <footer data-testid="footer"><b>WanderMind AI</b><span>Personalised travel planning, trip management and booking readiness.</span></footer>
   </main>
 }
 
